@@ -50,21 +50,26 @@ def custom_openapi():
 
 app.openapi = custom_openapi
 
-# Use GCP's default authentication in production
+# Initialize Google Cloud clients
 try:
-    # Try to find the service account key file
-    key_files = [f for f in os.listdir('.') if f.endswith('.json') and 'smiling-gasket' in f]
+    # In Cloud Run, use Application Default Credentials (ADC)
+    # For local development, set GOOGLE_APPLICATION_CREDENTIALS environment variable
+    google_creds_json = os.environ.get('GOOGLE_APPLICATION_CREDENTIALS_JSON')
     
-    if key_files:
-        key_file = key_files[0]  # Use the first matching key file
-        print(f"Using service account key: {key_file}")
-        creds = service_account.Credentials.from_service_account_file(key_file)
+    if google_creds_json:
+        # Parse JSON credentials from environment variable
+        import json
+        creds_info = json.loads(google_creds_json)
+        creds = service_account.Credentials.from_service_account_info(creds_info)
         client = vision.ImageAnnotatorClient(credentials=creds)
-        db = firestore.Client(credentials=creds)
+        db = firestore.Client(credentials=creds, project=creds_info.get('project_id'))
+        print("Using credentials from environment variable")
     else:
-        print("No service account key found, using default authentication")
+        # Use Application Default Credentials (recommended for Cloud Run)
         client = vision.ImageAnnotatorClient()
         db = firestore.Client()
+        print("Using Application Default Credentials")
+        
 except Exception as e:
     print(f"Failed to create Google clients: {str(e)}")
     raise RuntimeError("Failed to create Google clients: " + str(e))
@@ -72,17 +77,28 @@ except Exception as e:
 # Initialize Firebase Admin for verifying ID tokens
 try:
     if not firebase_admin._apps:
-        # Try to find the service account key file
-        key_files = [f for f in os.listdir('.') if f.endswith('.json') and 'smiling-gasket' in f]
+        firebase_creds_json = os.environ.get('FIREBASE_CREDENTIALS_JSON')
+        firebase_storage_bucket = os.environ.get('FIREBASE_STORAGE_BUCKET')
         
-        if key_files:
-            key_file = key_files[0]
-            print(f"Initializing Firebase Admin with key: {key_file}")
-            cred = firebase_credentials.Certificate(key_file)
-            firebase_admin.initialize_app(cred)
+        if firebase_creds_json:
+            # Parse JSON credentials from environment variable
+            import json
+            creds_info = json.loads(firebase_creds_json)
+            cred = firebase_credentials.Certificate(creds_info)
+            
+            # Initialize with storage bucket if provided
+            if firebase_storage_bucket:
+                firebase_admin.initialize_app(cred, {
+                    'storageBucket': firebase_storage_bucket
+                })
+                print(f"Initialized Firebase Admin with storage bucket: {firebase_storage_bucket}")
+            else:
+                firebase_admin.initialize_app(cred)
+                print("Initialized Firebase Admin without storage bucket")
         else:
-            print("No service account key found, initializing Firebase Admin with default credentials")
+            # Use Application Default Credentials for Firebase as well
             firebase_admin.initialize_app()
+            print("Initialized Firebase Admin with default credentials")
 except Exception as e:
     print(f"Firebase Admin init failed: {str(e)}")
 
@@ -155,7 +171,12 @@ def save_image_to_firestore(image_data: bytes, user_key: str, item_id: str = Non
         # Upload to Firebase Storage
         try:
             print("Debug: Attempting to get Firebase Storage bucket...")
-            bucket = firebase_storage.bucket()
+            # Get bucket name from environment or use default
+            bucket_name = os.environ.get('FIREBASE_STORAGE_BUCKET')
+            if bucket_name:
+                bucket = firebase_storage.bucket(bucket_name)
+            else:
+                bucket = firebase_storage.bucket()  # Uses default bucket
             print(f"Debug: Got bucket: {bucket}")
             
             blob = bucket.blob(f"images/{user_key}/{filename}")
