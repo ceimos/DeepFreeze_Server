@@ -56,6 +56,30 @@ app = FastAPI(
     version="1.0.0"
 )
 
+
+# --- User Auth: get_current_user_uid ---
+def get_current_user_uid(Authorization: str | None = Header(default=None)) -> str:
+    """Verify ID token and return the user's UID (used as Firestore document id)."""
+    print(f"Debug: Authorization header received: {Authorization}")
+    if not Authorization or not Authorization.lower().startswith("bearer "):
+        print(f"Debug: Invalid Authorization header format: {Authorization}")
+        raise HTTPException(status_code=401, detail="Missing or invalid Authorization header")
+    token = Authorization.split(" ", 1)[1]
+    print(f"Debug: Extracted token (first 50 chars): {token[:50]}...")
+    try:
+        print("Debug: Attempting to verify ID token...")
+        decoded = firebase_auth.verify_id_token(token)
+        print(f"Debug: Token decoded successfully: {decoded}")
+        uid = decoded.get("uid")
+        print(f"Debug: UID extracted: {uid}")
+        if not uid:
+            raise ValueError("No UID in token")
+        return uid
+    except Exception as e:
+        print(f"Debug: Token verification failed with error: {str(e)}")
+        print(f"Debug: Error type: {type(e)}")
+        raise HTTPException(status_code=401, detail="Invalid token")
+
 # --- Pi Device Registration Endpoint ---
 from fastapi import Body
 
