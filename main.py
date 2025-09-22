@@ -15,11 +15,73 @@ from google.oauth2 import service_account
 import firebase_admin
 from firebase_admin import auth as firebase_auth, credentials as firebase_credentials, storage as firebase_storage
 
+# --- Device API Key Utility ---
+import secrets
+import string
+
+def generate_pi_api_key() -> str:
+    """Generate a cryptographically secure API key for Pi devices"""
+    alphabet = string.ascii_letters + string.digits
+    key = ''.join(secrets.choice(alphabet) for _ in range(32))
+    return f"pk_live_{key}"
+
+# --- Device Authentication ---
+def get_user_from_auth(Authorization: str | None = Header(default=None)) -> str:
+    """Authenticate using either Bearer token (user) or Pi-Key (device)"""
+    if not Authorization:
+        raise HTTPException(status_code=401, detail="Missing Authorization header")
+    if Authorization.lower().startswith("bearer "):
+        return get_current_user_uid(Authorization)
+    elif Authorization.lower().startswith("pi-key "):
+        api_key = Authorization.split(" ", 1)[1]
+        # Query Firestore for device with this API key
+        device_query = db.collection('pi_devices').where('api_key', '==', api_key).where('status', '==', 'active').stream()
+        device = next(device_query, None)
+        if not device:
+            raise HTTPException(status_code=401, detail="Invalid or inactive Pi API key")
+        device_data = device.to_dict()
+        # Optionally update last_used timestamp
+        try:
+            device.reference.update({'last_used': datetime.now().isoformat()})
+        except Exception:
+            pass
+        return device_data['user_id']
+    else:
+        raise HTTPException(status_code=401, detail="Invalid Authorization header format")
+
+
 app = FastAPI(
     title="Food Identification API",
     description="API for identifying food items and expiry dates from images",
     version="1.0.0"
 )
+
+# --- Pi Device Registration Endpoint ---
+from fastapi import Body
+
+@app.post("/pi/register")
+async def register_pi_device(
+    device_name: str = Body(...),
+    device_location: str = Body(...),
+    device_id: str = Body(...),
+    user_key: str = Depends(get_current_user_uid)
+):
+    """
+    Register a Pi device for the authenticated user and return a unique API key.
+    """
+    api_key = generate_pi_api_key()
+    device_doc = {
+        'api_key': api_key,
+        'user_id': user_key,
+        'device_name': device_name,
+        'device_location': device_location,
+        'device_id': device_id,
+        'registered_at': datetime.now().isoformat(),
+        'last_used': None,
+        'status': 'active'
+    }
+    db.collection('pi_devices').add(device_doc)
+    return {'success': True, 'api_key': api_key, 'message': 'Device registered successfully'}
 
 # Add security scheme to OpenAPI
 def custom_openapi():
@@ -262,7 +324,7 @@ FOOD_EXPIRY_DAYS = {
 
 
 @app.post("/route/")
-async def route_image(image: UploadFile = File(...), user_key: str = Depends(get_current_user_uid)):
+async def route_image(image: UploadFile = File(...), user_key: str = Depends(get_user_from_auth)):
     """
     Identify food items only. If the image is invalid, return invalid.
     Returns: { "food_name": string, "expiry_date": YYYY-MM-DD } or { "message": "invalid" }
