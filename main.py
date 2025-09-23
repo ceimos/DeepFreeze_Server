@@ -1,3 +1,4 @@
+
 import os
 import re
 import requests
@@ -910,3 +911,19 @@ async def test_image_no_auth(image_id: str):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
 
+# --- List Pi Devices Endpoint ---
+@app.get("/pi/list")
+async def list_pi_devices(user_key: str = Depends(get_current_user_uid)):
+    """
+    List all Pi devices registered for the authenticated user.
+    """
+    try:
+        devices = db.collection('pi_devices').where('user_id', '==', user_key).stream()
+        device_list = []
+        for device in devices:
+            data = device.to_dict()
+            data['id'] = device.id
+            device_list.append(data)
+        return {"devices": device_list}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
