@@ -1,4 +1,5 @@
 
+
 import os
 import re
 import requests
@@ -6,7 +7,7 @@ import numpy as np  # unused if OCR-only path is used; kept for compatibility
 import base64
 import io
 from PIL import Image
-from fastapi import FastAPI, File, UploadFile, HTTPException, Depends, Header
+from fastapi import FastAPI, File, UploadFile, HTTPException, Depends, Header,Body
 from fastapi.responses import JSONResponse
 from fastapi.openapi.utils import get_openapi
 from google.cloud import vision
@@ -925,5 +926,40 @@ async def list_pi_devices(user_key: str = Depends(get_current_user_uid)):
             data['id'] = device.id
             device_list.append(data)
         return {"devices": device_list}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
+    
+# --- Pi Device Confirm Registration Endpoint ---
+from fastapi import Body
+
+@app.post("/pi/confirm-registration")
+async def confirm_pi_registration(api_key: str = Body(...)):
+    """
+    Pi device confirms registration by sending its API key. Server verifies and marks device as confirmed.
+    """
+    try:
+        device_query = db.collection('pi_devices').where('api_key', '==', api_key).stream()
+        device = next(device_query, None)
+        if not device:
+            raise HTTPException(status_code=404, detail="API key not found")
+        device.reference.update({'confirmed': True, 'confirmation_time': datetime.now().isoformat()})
+        return {"success": True, "message": "Registration complete"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
+    
+# --- Pi Registration Status Endpoint ---
+@app.post("/pi/status")
+async def pi_registration_status(device_id: str = Body(...), user_key: str = Depends(get_current_user_uid)):
+    """
+    Check if a Pi device is registered/confirmed for the authenticated user.
+    """
+    try:
+        device_query = db.collection('pi_devices').where('user_id', '==', user_key).where('device_id', '==', device_id).stream()
+        device = next(device_query, None)
+        if not device:
+            return {"registered": False}
+        data = device.to_dict()
+        registered = bool(data.get('confirmed'))
+        return {"registered": registered, "device": data}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
