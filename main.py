@@ -205,27 +205,23 @@ except Exception as e:
 try:
     if not firebase_admin._apps:
         firebase_creds_json = os.environ.get('FIREBASE_CREDENTIALS_JSON')
-        firebase_storage_bucket = os.environ.get('FIREBASE_STORAGE_BUCKET')
-        
+        # Always use the provided bucket name for Cloud Run
+        firebase_storage_bucket = 'smiling-gasket-468408-u8.firebasestorage.app'
         if firebase_creds_json:
             # Parse JSON credentials from environment variable
             import json
             creds_info = json.loads(firebase_creds_json)
             cred = firebase_credentials.Certificate(creds_info)
-            
-            # Initialize with storage bucket if provided
-            if firebase_storage_bucket:
-                firebase_admin.initialize_app(cred, {
-                    'storageBucket': firebase_storage_bucket
-                })
-                print(f"Initialized Firebase Admin with storage bucket: {firebase_storage_bucket}")
-            else:
-                firebase_admin.initialize_app(cred)
-                print("Initialized Firebase Admin without storage bucket")
+            firebase_admin.initialize_app(cred, {
+                'storageBucket': firebase_storage_bucket
+            })
+            print(f"Initialized Firebase Admin with storage bucket: {firebase_storage_bucket}")
         else:
             # Use Application Default Credentials for Firebase as well
-            firebase_admin.initialize_app()
-            print("Initialized Firebase Admin with default credentials")
+            firebase_admin.initialize_app(options={
+                'storageBucket': firebase_storage_bucket
+            })
+            print(f"Initialized Firebase Admin with default credentials and storage bucket: {firebase_storage_bucket}")
 except Exception as e:
     print(f"Firebase Admin init failed: {str(e)}")
 
@@ -298,12 +294,8 @@ def save_image_to_firestore(image_data: bytes, user_key: str, item_id: str = Non
         # Upload to Firebase Storage
         try:
             print("Debug: Attempting to get Firebase Storage bucket...")
-            # Get bucket name from environment or use default
-            bucket_name = os.environ.get('FIREBASE_STORAGE_BUCKET')
-            if bucket_name:
-                bucket = firebase_storage.bucket(bucket_name)
-            else:
-                bucket = firebase_storage.bucket()  # Uses default bucket
+            bucket_name = 'smiling-gasket-468408-u8.firebasestorage.app'
+            bucket = firebase_storage.bucket(bucket_name)
             print(f"Debug: Got bucket: {bucket}")
             
             blob = bucket.blob(f"images/{user_key}/{filename}")
