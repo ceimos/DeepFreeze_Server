@@ -619,17 +619,20 @@ async def process_food_prediction(contents: bytes, user_key: str | None = None, 
 
     labels = response.label_annotations or []
 
-    # Find matching food strictly from keywords
-    food_name = None
-    for label in labels:
-        desc = (label.description or "").lower()
-        if desc in FOOD_KEYWORDS:
-            food_name = desc
-            break
+    if labels:
+        food_name = labels[0].description.lower()
+    else :
+        raise HTTPException(status_code=400, detail="invalid")
+        
+    # for label in labels:
+    #     desc = (label.description or "").lower()
+    #     if desc in FOOD_KEYWORDS:
+    #         food_name = desc
+    #         break
 
     if not food_name:
         raise HTTPException(status_code=400, detail="invalid")
-
+    
     expiry_days = FOOD_EXPIRY_DAYS.get(food_name, 7)
     expiry_date = (datetime.today() + timedelta(days=expiry_days)).strftime("%Y-%m-%d")
     
@@ -930,7 +933,6 @@ async def list_pi_devices(user_key: str = Depends(get_current_user_uid)):
         raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
     
 # --- Pi Device Confirm Registration Endpoint ---
-from fastapi import Body
 
 @app.post("/pi/confirm-registration")
 async def confirm_pi_registration(api_key: str = Body(...)):
