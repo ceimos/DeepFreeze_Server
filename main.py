@@ -1,4 +1,5 @@
-
+import torch
+from torchvision import models, transforms
 
 import os
 import re
@@ -20,6 +21,44 @@ from firebase_admin import auth as firebase_auth, credentials as firebase_creden
 # --- Device API Key Utility ---
 import secrets
 import string
+
+# Load Food-101 model and weights at startup
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+food101_model = models.resnet50(pretrained=False)
+food101_model.fc = torch.nn.Linear(food101_model.fc.in_features, 101)
+food101_model.load_state_dict(torch.load("img_classifier_weight.pth", map_location=device))
+food101_model.to(device)
+food101_model.eval()
+
+# Load Food-101 class labels (replace with actual list)
+def load_food101_labels():
+    classes_path = os.path.join(os.path.dirname(__file__), "classes.txt")
+    labels_path = os.path.join(os.path.dirname(__file__), "labels.txt")
+    with open(classes_path, "r", encoding="utf-8") as f:
+        class_names = [line.strip() for line in f if line.strip()]
+    with open(labels_path, "r", encoding="utf-8") as f:
+        label_names = [line.strip() for line in f if line.strip()]
+    if len(class_names) != len(label_names):
+        raise ValueError("classes.txt and labels.txt must have the same number of lines")
+    return class_names, label_names
+
+FOOD101_CLASS_NAMES, FOOD101_LABEL_NAMES = load_food101_labels()
+
+def predict_food101(image_bytes):
+    image = Image.open(io.BytesIO(image_bytes)).convert('RGB')
+    transform = transforms.Compose([
+        transforms.Resize(256),
+        transforms.CenterCrop(224),
+        transforms.ToTensor(),
+        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+    ])
+    image = transform(image).unsqueeze(0).to(device)
+    with torch.no_grad():
+        outputs = food101_model(image)
+        _, predicted = torch.max(outputs, 1)
+        # Return human-readable label
+        return FOOD101_LABEL_NAMES[predicted.item()]
+
 
 def generate_pi_api_key() -> str:
     """Generate a cryptographically secure API key for Pi devices"""
@@ -352,42 +391,61 @@ FOOD_EXPIRY_DAYS = {
 @app.post("/route/")
 async def route_image(image: UploadFile = File(...), user_key: str = Depends(get_user_from_auth)):
     """
-    Identify food items only. If the image is invalid, return invalid.
+    Identify food items or barcode. If the image is invalid, return invalid.
     Returns: { "food_name": string, "expiry_date": YYYY-MM-DD } or { "message": "invalid" }
     """
     try:
         contents = await image.read()
         mime_type = image.content_type or "image/jpeg"
-        
+
         # Save image to Firestore first
         image_id = save_image_to_firestore(contents, user_key)
-        
-        # First try direct food prediction
-        try:
-            return await process_food_prediction(contents, user_key, image_id)
-        except HTTPException as he:
-            if he.status_code != 400:
-                raise
-            # If not a food by labels, try to interpret as barcode -> food
+
+        # Use Vision API to route
+        vision_image = vision.Image(content=contents)
+        response = client.label_detection(image=vision_image, max_results=10)
+        labels = response.label_annotations or []
+        top_label = labels[0].description.lower() if labels else ""
+
+        # Barcode path
+        if "barcode" in top_label or "label" in top_label:
+            return await process_barcode_to_food(contents, mime_type, user_key, image_id)
+
+        # Food path: use custom model if top label is food/dish
+        elif "food" in top_label or "dish" in top_label:
             try:
-                return await process_barcode_to_food(contents, mime_type, user_key, image_id)
-            except HTTPException as he2:
-                if he2.status_code == 400:
-                    # Store unknown as requested
-                    try:
-                        save_inventory_item({
-                            "food_name": "unknown",
-                            "expiry_date": None,
-                            "source": "unknown",
-                            "image_id": image_id,
-                            "quantity": 1,
-                            "created_at": datetime.now().isoformat(),
-                            "status": "active"
-                        }, user_key)
-                    except Exception:
-                        pass
-                    return JSONResponse(status_code=400, content={"message": "invalid"})
-                raise
+                food_name = predict_food101(contents)
+                expiry_days = FOOD_EXPIRY_DAYS.get(food_name, 7)
+                expiry_date = (datetime.today() + timedelta(days=expiry_days)).strftime("%Y-%m-%d")
+                save_inventory_item({
+                    "food_name": food_name,
+                    "expiry_date": expiry_date,
+                    "source": "image",
+                    "image_id": image_id,
+                    "quantity": 1,
+                    "created_at": datetime.now().isoformat(),
+                    "status": "active"
+                }, user_key)
+                return {"food_name": food_name, "expiry_date": expiry_date}
+            except Exception as e:
+                print(f"Custom model prediction failed: {str(e)}")
+                return JSONResponse(status_code=400, content={"message": "invalid"})
+
+        # Unknown
+        else:
+            try:
+                save_inventory_item({
+                    "food_name": "unknown",
+                    "expiry_date": None,
+                    "source": "unknown",
+                    "image_id": image_id,
+                    "quantity": 1,
+                    "created_at": datetime.now().isoformat(),
+                    "status": "active"
+                }, user_key)
+            except Exception:
+                pass
+            return JSONResponse(status_code=400, content={"message": "invalid"})
     except HTTPException as he:
         if he.status_code == 400:
             return JSONResponse(status_code=400, content={"message": "invalid"})
@@ -632,7 +690,7 @@ async def process_food_prediction(contents: bytes, user_key: str | None = None, 
 
     if not food_name:
         raise HTTPException(status_code=400, detail="invalid")
-    
+
     expiry_days = FOOD_EXPIRY_DAYS.get(food_name, 7)
     expiry_date = (datetime.today() + timedelta(days=expiry_days)).strftime("%Y-%m-%d")
     
