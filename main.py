@@ -388,63 +388,61 @@ async def route_image(image: UploadFile = File(...), user_key: str = Depends(get
     """
     try:
         contents = await image.read()
+        if not contents:
+            return JSONResponse(status_code=400, content={"message": "No image data received. Please upload a valid image file."})
         mime_type = image.content_type or "image/jpeg"
 
-        # Save image to Firestore first
-        image_id = save_image_to_firestore(contents, user_key)
+        try:
+            image_id = save_image_to_firestore(contents, user_key)
+        except Exception as e:
+            print(f"Error saving image to Firestore: {str(e)}")
+            return JSONResponse(status_code=500, content={"message": f"Failed to save image to Firestore: {str(e)}"})
 
-        # Use Vision API to route
-        vision_image = vision.Image(content=contents)
-        response = client.label_detection(image=vision_image, max_results=10)
-        labels = response.label_annotations or []
-        top_label = labels[0].description.lower() if labels else ""
+        try:
+            vision_image = vision.Image(content=contents)
+            response = client.label_detection(image=vision_image, max_results=10)
+            labels = response.label_annotations or []
+            label_descriptions = [lbl.description.lower() for lbl in labels]
+        except Exception as e:
+            print(f"Vision API label detection failed: {str(e)}")
+            return JSONResponse(status_code=500, content={"message": f"Vision API label detection failed: {str(e)}"})
 
-        # Barcode path
-        if "barcode" in top_label or "label" in top_label:
-            return await process_barcode_to_food(contents, mime_type, user_key, image_id)
-
-        # Food path: use custom model if top label is food/dish
-        elif "food" in top_label or "dish" in top_label:
+        # Only check for barcode-related labels
+        BARCODE_LABEL_KEYWORDS = {"barcode", "label", "packaging", "package", "container"}
+        if any(kw in desc for desc in label_descriptions for kw in BARCODE_LABEL_KEYWORDS):
             try:
-                food_name = predict_food101(contents)
-                expiry_days = FOOD_EXPIRY_DAYS.get(food_name, 7)
-                expiry_date = (datetime.today() + timedelta(days=expiry_days)).strftime("%Y-%m-%d")
-                save_inventory_item({
-                    "food_name": food_name,
-                    "expiry_date": expiry_date,
-                    "source": "image",
-                    "image_id": image_id,
-                    "quantity": 1,
-                    "created_at": datetime.now().isoformat(),
-                    "status": "active"
-                }, user_key)
-                return {"food_name": food_name, "expiry_date": expiry_date}
+                return await process_barcode_to_food(contents, mime_type, user_key, image_id)
+            except HTTPException as he:
+                print(f"Barcode processing error: {he.detail}")
+                return JSONResponse(status_code=he.status_code, content={"message": f"Barcode processing error: {he.detail}"})
             except Exception as e:
-                print(f"Custom model prediction failed: {str(e)}")
-                return JSONResponse(status_code=400, content={"message": "invalid"})
+                print(f"Unexpected error in barcode processing: {str(e)}")
+                return JSONResponse(status_code=500, content={"message": f"Unexpected error in barcode processing: {str(e)}"})
 
-        # Unknown
-        else:
-            try:
-                save_inventory_item({
-                    "food_name": "unknown",
-                    "expiry_date": None,
-                    "source": "unknown",
-                    "image_id": image_id,
-                    "quantity": 1,
-                    "created_at": datetime.now().isoformat(),
-                    "status": "active"
-                }, user_key)
-            except Exception:
-                pass
-            return JSONResponse(status_code=400, content={"message": "invalid"})
+        # Otherwise, send to ResNet model for food prediction
+        try:
+            food_name = predict_food101(contents)
+            expiry_days = FOOD_EXPIRY_DAYS.get(food_name, 7)
+            expiry_date = (datetime.today() + timedelta(days=expiry_days)).strftime("%Y-%m-%d")
+            save_inventory_item({
+                "food_name": food_name,
+                "expiry_date": expiry_date,
+                "source": "image",
+                "image_id": image_id,
+                "quantity": 1,
+                "created_at": datetime.now().isoformat(),
+                "status": "active"
+            }, user_key)
+            return {"food_name": food_name, "expiry_date": expiry_date}
+        except Exception as e:
+            print(f"Custom model prediction failed: {str(e)}")
+            return JSONResponse(status_code=400, content={"message": f"Food prediction failed: {str(e)}"})
     except HTTPException as he:
-        if he.status_code == 400:
-            return JSONResponse(status_code=400, content={"message": "invalid"})
-        raise
+        print(f"HTTPException: {he.detail}")
+        return JSONResponse(status_code=he.status_code, content={"message": f"HTTP error: {he.detail}"})
     except Exception as e:
-        print(f"Error processing image: {str(e)}")
-        return JSONResponse(status_code=400, content={"message": "invalid"})
+        print(f"Unexpected error processing image: {str(e)}")
+        return JSONResponse(status_code=500, content={"message": f"Unexpected error processing image: {str(e)}"})
 
 @app.get("/users/me/inventory")
 async def get_my_inventory(user_key: str = Depends(get_current_user_uid)):
