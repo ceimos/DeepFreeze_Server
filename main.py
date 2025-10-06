@@ -999,7 +999,6 @@ async def confirm_pi_registration(api_key: str = Body(...)):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
     
-# --- Pi Registration Status Endpoint ---
 @app.post("/pi/status")
 async def pi_registration_status(device_id: str = Body(...), user_key: str = Depends(get_current_user_uid)):
     """
@@ -1013,5 +1012,23 @@ async def pi_registration_status(device_id: str = Body(...), user_key: str = Dep
         data = device.to_dict()
         registered = bool(data.get('confirmed'))
         return {"registered": registered, "device": data}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
+
+# --- Pi Device Delete Endpoint ---
+@app.post("/pi/delete")
+async def delete_pi_device(device_id: str = Body(...), user_key: str = Depends(get_current_user_uid)):
+    """
+    Delete a Pi device for the authenticated user by device_id.
+    """
+    try:
+        device_query = db.collection('pi_devices').where('user_id', '==', user_key).where('device_id', '==', device_id).stream()
+        device = next(device_query, None)
+        if not device:
+            raise HTTPException(status_code=404, detail="Device not found")
+        device.reference.delete()
+        return {"success": True, "message": "Device deleted successfully"}
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
