@@ -25,5 +25,14 @@ python-dateutil==2.8.2
 
 # Python multipart for file uploads
 python-multipart==0.0.6
+
+# Environment variables
+python-dotenv==1.0.0
+
+# AI/Chatbot
+langchain-groq==0.0.1
+langchain==0.1.0
+
+# Machine Learning
 torch
 torchvision
