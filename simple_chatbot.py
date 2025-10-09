@@ -22,7 +22,7 @@ import uvicorn
 # =============================================================================
 
 # Get API key from environment
-GROQ_API_KEY = "***REMOVED***"
+GROQ_API_KEY = "sdf"
 if not GROQ_API_KEY:
     print("❌ Please set GROQ_API_KEY environment variable")
     print("   Get your key from: https://console.groq.com/")

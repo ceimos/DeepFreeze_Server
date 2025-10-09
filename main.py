@@ -1069,7 +1069,7 @@ async def delete_pi_device(device_id: str = Body(...), user_key: str = Depends(g
 class SimpleChatbot:
     def __init__(self):
         # Get API key from environment
-        GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "***REMOVED***")
+        GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "sdf")
         if not GROQ_API_KEY:
             print("[ERROR] Please set GROQ_API_KEY environment variable")
             print("   Get your key from: https://console.groq.com/")
