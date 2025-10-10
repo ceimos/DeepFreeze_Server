@@ -452,7 +452,33 @@ async def route_image(image: UploadFile = File(...), user_key: str = Depends(get
 
         # Otherwise, send to ResNet model for food prediction
         try:
-            food_name = predict_food101(contents)
+            # List of common food items and fruits
+            COMMON_FOOD_ITEMS = [
+                "apple", "banana", "orange", "grape", "mango", "pineapple", "papaya", "pear",
+                "strawberry", "blueberry", "raspberry", "watermelon", "melon", "lemon", "lime",
+                "peach", "plum", "cherry", "kiwi", "guava", "pomegranate", "coconut",
+                "potato", "tomato", "onion", "carrot", "lettuce", "cabbage", "spinach", "broccoli",
+                "cauliflower", "capsicum", "chili", "garlic", "ginger", "peas", "corn", "okra",
+                "radish", "beetroot", "brinjal", "cucumber", "zucchini", "mushroom", "beans",
+                "bread", "cheese", "egg", "milk", "yogurt", "butter", "chicken", "beef", "pork",
+                "fish", "shrimp", "rice", "pasta", "noodle", "soup", "salad", "pizza", "burger",
+                "sandwich", "sausage", "bacon", "ham", "cake", "cookie", "chocolate", "ice cream",
+                "snack", "cereal", "oatmeal", "nut", "almond", "cashew", "walnut", "peanut"
+            ]
+
+            # Find the first matching label
+            food_name = None
+            for desc in label_descriptions:
+                for item in COMMON_FOOD_ITEMS:
+                    if item in desc:
+                        food_name = item
+                        break
+                if food_name:
+                    break
+            # Fallback to first label if no match
+            if not food_name and label_descriptions:
+                food_name = label_descriptions[0]
+
             expiry_days = FOOD_EXPIRY_DAYS.get(food_name, 7)
             expiry_date = (datetime.today() + timedelta(days=expiry_days)).strftime("%Y-%m-%d")
             save_inventory_item({
