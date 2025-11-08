@@ -36,3 +36,4 @@ langchain==0.1.0
 # Machine Learning
 torch
 torchvision
+tqdm
