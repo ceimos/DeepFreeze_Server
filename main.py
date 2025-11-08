@@ -9,8 +9,8 @@ from PIL import Image
 from fastapi import FastAPI, File, UploadFile, HTTPException, Depends, Header, Body
 from fastapi.responses import JSONResponse
 from fastapi.openapi.utils import get_openapi
-from google.cloud import vision
 from google.cloud import firestore
+from pyzbar import pyzbar
 from datetime import datetime, timedelta
 from google.oauth2 import service_account
 import firebase_admin
@@ -215,8 +215,7 @@ def custom_openapi():
 
 app.openapi = custom_openapi
 
-# Initialize Google Cloud clients
-client = None
+# Initialize Firestore client
 db = None
 try:
     # Try multiple methods to get credentials
@@ -247,18 +246,16 @@ try:
             creds = service_account.Credentials.from_service_account_file(default_creds_file)
     
     if creds:
-        client = vision.ImageAnnotatorClient(credentials=creds)
         db = firestore.Client(credentials=creds, project=creds_info.get('project_id'))
     else:
         # Try to use Application Default Credentials (recommended for Cloud Run)
         try:
-            client = vision.ImageAnnotatorClient()
             db = firestore.Client()
         except Exception:
-            pass  # Clients will be None if initialization fails
+            pass  # Client will be None if initialization fails
         
 except Exception:
-    pass  # Clients will be None if initialization fails
+    pass  # Client will be None if initialization fails
 
 # Initialize Firebase Admin for verifying ID tokens
 try:
@@ -392,62 +389,110 @@ async def route_image(image: UploadFile = File(...), user_key: str = Depends(get
 
         image_id = save_image_to_firestore(contents, user_key)
 
-        # Check for barcode using Google Vision API first
+        # Check for barcode using pyzbar (free, open-source library)
+        # Try multiple preprocessing techniques for robust detection
         barcode_detected = False
-        if client is not None:
-            try:
-                # Import from vision_v1 (correct package)
-                from google.cloud import vision_v1
-                
-                # Create Vision Image object
-                vision_image = vision_v1.Image(content=contents)
-                
-                # Specify barcode detection feature
-                feature = vision_v1.Feature(type_=vision_v1.Feature.Type.BARCODE_DETECTION)
-                
-                # Create the request
-                request = vision_v1.AnnotateImageRequest(image=vision_image, features=[feature])
-                
-                # Perform the annotation
-                response = client.annotate_image(request=request)
-                
-                # Extract barcodes from response
-                if response and hasattr(response, 'barcode_annotations') and len(response.barcode_annotations) > 0:
-                    # Get barcode value (raw_value is the standard attribute)
-                    barcode_value = response.barcode_annotations[0].raw_value
-                    
-                    if barcode_value:
-                        barcode_detected = True
-                        # Look up product information
-                        result = await process_barcode_from_value(barcode_value, contents, mime_type, user_key, image_id)
-                        
-                        # If lookup succeeded, return result
-                        if result and result.get("food_name"):
-                            return result
-                        
-                        # If barcode detected but lookup failed, return invalid
-                        return JSONResponse(status_code=400, content={"message": "invalid"})
-            except Exception:
-                # If barcode detection fails, continue to ML prediction
-                pass
+        barcode_value = None
         
-        # Only use ML prediction if NO barcode was detected
-        if not barcode_detected:
-            # If no barcode found, use EfficientNet V2 S model for food prediction
-            food_name = predict_food(contents)
-            expiry_days = FOOD_EXPIRY_DAYS.get(food_name.lower(), 7)
-            expiry_date = (datetime.today() + timedelta(days=expiry_days)).strftime("%Y-%m-%d")
+        try:
+            # Open image with PIL
+            pil_image = Image.open(io.BytesIO(contents))
             
-            save_inventory_item({
-                "food_name": food_name,
-                "expiry_date": expiry_date,
-                "source": "image",
-                "image_id": image_id,
-                "quantity": 1,
-                "created_at": datetime.now().isoformat(),
-                "status": "active"
-            }, user_key)
-            return {"food_name": food_name, "expiry_date": expiry_date}
+            # Try multiple preprocessing techniques to improve barcode detection
+            image_variants = []
+            
+            # 1. Original RGB image
+            if pil_image.mode != 'RGB':
+                rgb_image = pil_image.convert('RGB')
+            else:
+                rgb_image = pil_image.copy()
+            image_variants.append(('original', rgb_image))
+            
+            # 2. Grayscale (often better for barcode detection)
+            gray_image = rgb_image.convert('L')
+            image_variants.append(('grayscale', gray_image))
+            
+            # 3. Enhanced contrast (multiple levels)
+            from PIL import ImageEnhance
+            for contrast_level in [1.5, 2.0, 2.5]:
+                enhancer = ImageEnhance.Contrast(rgb_image)
+                high_contrast = enhancer.enhance(contrast_level)
+                image_variants.append((f'contrast_{contrast_level}', high_contrast))
+            
+            # 4. Sharpened image (multiple levels)
+            for sharpness_level in [1.5, 2.0, 2.5]:
+                enhancer = ImageEnhance.Sharpness(rgb_image)
+                sharpened = enhancer.enhance(sharpness_level)
+                image_variants.append((f'sharp_{sharpness_level}', sharpened))
+            
+            # 5. Brightness adjusted (barcode might be too dark or too bright)
+            for brightness_level in [0.7, 0.8, 1.2, 1.3]:
+                enhancer = ImageEnhance.Brightness(rgb_image)
+                brightened = enhancer.enhance(brightness_level)
+                image_variants.append((f'brightness_{brightness_level}', brightened))
+            
+            # 6. Resized larger (if image is small, barcodes might be hard to detect)
+            if rgb_image.width < 800 or rgb_image.height < 800:
+                larger = rgb_image.resize((rgb_image.width * 2, rgb_image.height * 2), Image.Resampling.LANCZOS)
+                image_variants.append(('resized_larger', larger))
+                # Also try grayscale of larger image
+                larger_gray = larger.convert('L')
+                image_variants.append(('resized_larger_gray', larger_gray))
+            
+            # 7. Rotated versions (barcode might be at an angle)
+            for angle in [90, 180, 270]:
+                rotated = rgb_image.rotate(angle, expand=True)
+                image_variants.append((f'rotated_{angle}', rotated))
+                # Also try grayscale rotated
+                rotated_gray = rotated.convert('L')
+                image_variants.append((f'rotated_{angle}_gray', rotated_gray))
+            
+            # 8. Try with different resampling methods for better quality
+            if rgb_image.width < 1200 or rgb_image.height < 1200:
+                # Upscale with high quality
+                upscaled = rgb_image.resize((rgb_image.width * 3, rgb_image.height * 3), Image.Resampling.LANCZOS)
+                image_variants.append(('upscaled_3x', upscaled))
+                upscaled_gray = upscaled.convert('L')
+                image_variants.append(('upscaled_3x_gray', upscaled_gray))
+            
+            # Try detecting barcode in all image variants
+            for variant_name, variant_image in image_variants:
+                try:
+                    # Detect barcodes using pyzbar
+                    barcodes = pyzbar.decode(variant_image)
+                    
+                    if barcodes and len(barcodes) > 0:
+                        # Get the first barcode value
+                        try:
+                            barcode_value = barcodes[0].data.decode('utf-8')
+                        except UnicodeDecodeError:
+                            # Try alternative decoding
+                            barcode_value = barcodes[0].data.decode('latin-1')
+                        
+                        if barcode_value and len(barcode_value) >= 8:  # Valid barcodes are usually at least 8 digits
+                            barcode_detected = True
+                            break  # Found barcode, no need to try other variants
+                except Exception:
+                    continue  # Try next variant
+            
+            # If barcode detected, look up product information
+            if barcode_detected and barcode_value:
+                result = await process_barcode_from_value(barcode_value, contents, mime_type, user_key, image_id)
+                
+                # If lookup succeeded, return result
+                if result and result.get("food_name"):
+                    return result
+                
+                # If barcode detected but lookup failed, return invalid
+                return JSONResponse(status_code=400, content={"message": "invalid"})
+            
+            # If barcode detection was attempted but failed, return invalid
+            # This prevents misclassification (e.g., barcode image being classified as "kiwi")
+            # Instead of falling back to food model, return invalid
+            return JSONResponse(status_code=400, content={"message": "invalid"})
+        except Exception:
+            # If barcode detection fails due to error, return invalid
+            return JSONResponse(status_code=400, content={"message": "invalid"})
     except HTTPException as he:
         return JSONResponse(status_code=he.status_code, content={"message": f"HTTP error: {he.detail}"})
     except Exception as e:
@@ -647,61 +692,21 @@ async def health_check():
 
 @app.get("/debug/barcode")
 async def debug_barcode():
-    """Debug endpoint to test barcode detection setup"""
-    return {
-        "client_available": client is not None,
-        "client_type": str(type(client)) if client else None,
-        "client_methods": [m for m in dir(client) if 'barcode' in m.lower() or 'annotate' in m.lower()] if client else [],
-        "db_available": db is not None
-    }
-
-@app.get("/debug/barcode-test")
-async def debug_barcode_test():
-    """Test barcode detection with detailed error information"""
-    if client is None:
-        return {"error": "Google Vision client not initialized"}
-    
+    """Debug endpoint to check barcode detection library"""
     try:
-        # Import from vision_v1 (correct package)
-        from google.cloud import vision_v1
-        
-        # Create a simple test image (1x1 pixel)
-        from PIL import Image as PILImage
-        import io
-        test_img = PILImage.new('RGB', (1, 1), color='white')
-        img_bytes = io.BytesIO()
-        test_img.save(img_bytes, format='PNG')
-        img_bytes = img_bytes.getvalue()
-        
-        vision_image = vision_v1.Image(content=img_bytes)
-        
-        # Specify barcode detection feature
-        feature = vision_v1.Feature(type_=vision_v1.Feature.Type.BARCODE_DETECTION)
-        
-        # Create the request
-        request = vision_v1.AnnotateImageRequest(image=vision_image, features=[feature])
-        
-        # Use annotate_image method
-        try:
-            response = client.annotate_image(request=request)
-            return {
-                "status": "success",
-                "method": "annotate_image_with_barcode_feature",
-                "response_type": str(type(response)),
-                "has_barcode_annotations": hasattr(response, 'barcode_annotations'),
-                "barcodes_count": len(response.barcode_annotations) if hasattr(response, 'barcode_annotations') else 0,
-                "client_type": str(type(client))
-            }
-        except Exception as e:
-            return {
-                "status": "error",
-                "error": str(e),
-                "error_type": str(type(e)),
-                "client_type": str(type(client)),
-                "available_methods": [m for m in dir(client) if 'annotate' in m.lower()]
-            }
-    except Exception as e:
-        return {"error": str(e), "type": str(type(e))}
+        from pyzbar import pyzbar
+        return {
+            "barcode_library": "pyzbar",
+            "library_available": True,
+            "db_available": db is not None
+        }
+    except ImportError:
+        return {
+            "barcode_library": "pyzbar",
+            "library_available": False,
+            "error": "pyzbar not installed. Install with: pip install pyzbar",
+            "db_available": db is not None
+        }
 
 
 @app.get("/users/me/images")
