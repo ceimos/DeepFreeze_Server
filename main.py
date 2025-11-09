@@ -24,6 +24,8 @@ from langchain.schema import HumanMessage, SystemMessage
 from pydantic import BaseModel
 from typing import List, Dict, Any
 
+from firebaseRTDBOps import router as rtdb
+
 # Environment variables
 from dotenv import load_dotenv
 load_dotenv()  # Load environment variables from .env file
@@ -127,6 +129,8 @@ app = FastAPI(
     description="API for identifying food items and expiry dates from images",
     version="1.0.0"
 )
+
+app.include_router(rtdb)
 
 
 # --- User Auth: get_current_user_uid ---
@@ -1285,7 +1289,7 @@ Get creative and experiment! 🎨"""
                 return f"✅ Yes! You have {ingredient['display_name']} ({ingredient['quantity']} {ingredient['unit']}) in your fridge!"
         
         # Check for common "what's in my fridge" phrases
-        if any(phrase in message_lower for phrase in ["what's in", "what do i have", "show me", "list"]):
+        if any(phrase in message_lower for phrase in ["what's in", "what do i have", "show me", "list my", "do i have", "what about"]):
             ingredients_list = "\n".join([
                 f"• {ing['display_name']} ({ing['quantity']} {ing['unit']})" 
                 for ing in ingredients
@@ -1391,6 +1395,8 @@ async def chatbot_get_inventory(user_key: str = Depends(get_current_user_uid)):
         return {"user_id": user_key, "items": items, "total_items": len(items)}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
 
 # =============================================================================
 # RUN THE SERVER
