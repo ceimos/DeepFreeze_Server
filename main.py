@@ -17,14 +17,13 @@ from datetime import datetime, timedelta
 from google.oauth2 import service_account
 import firebase_admin
 from firebase_admin import auth as firebase_auth, credentials as firebase_credentials, storage as firebase_storage
-
+from firebase_admin import db, initialize_app, firestore
 # Chatbot imports
 from langchain_groq import ChatGroq
 from langchain.schema import HumanMessage, SystemMessage
 from pydantic import BaseModel
 from typing import List, Dict, Any
 
-from firebaseRTDBOps import router as rtdb
 
 # Environment variables
 from dotenv import load_dotenv
@@ -54,6 +53,13 @@ class InventoryItem(BaseModel):
     unit: str
     expiry_date: str = None
     category: str = None
+
+cred = firebase_credentials.Certificate("smiling-gasket-468408-u8-06ed44d996c7.json")  # Replace with your Firebase service account key file
+initialize_app(cred, {
+    'databaseURL': 'https://smiling-gasket-468408-u8-default-rtdb.asia-southeast1.firebasedatabase.app/'  # Replace with your Firebase Realtime Database URL
+})
+firestore_client = firestore.client()  # Initialize Firestore client
+
 
 # Load Food-101 model and weights at startup
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -129,8 +135,6 @@ app = FastAPI(
     description="API for identifying food items and expiry dates from images",
     version="1.0.0"
 )
-
-app.include_router(rtdb)
 
 
 # --- User Auth: get_current_user_uid ---
@@ -1396,6 +1400,60 @@ async def chatbot_get_inventory(user_key: str = Depends(get_current_user_uid)):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+@app.post('/RTDB/update_firebase_readings')
+async def update_firebase_readings(request: Request):
+    """
+    Update Firebase Realtime Database with sensor readings.
+
+    Expects a JSON payload with the following keys:
+        - pi_key (str): API key of the Pi device.
+        - temperature (str): Temperature reading.
+        - humidity (str): Humidity reading.
+        - door_status (str): Door status.
+        - gas_status (str): Gas status.
+    """
+    try:
+        # Parse JSON payload
+        data = await request.json()
+        pi_key = data['pi_key']
+        temperature = data['temperature']
+        humidity = data['humidity']
+        door_status = data['door_status']
+        gas_status = data['gas_status']
+
+        # Query Firestore to get the user_id (uid) associated with the pi_key
+        device_query = firestore_client.collection('pi_devices').where('api_key', '==', pi_key).where('status', '==', 'active').stream()
+        device = next(device_query, None)
+        if not device:
+            raise HTTPException(status_code=401, detail="Invalid or inactive Pi API key")
+        
+        device_data = device.to_dict()
+        uid = device_data['user_id']
+
+        # Optionally update the last_used timestamp for the device
+        try:
+            firestore_client.collection('pi_devices').document(device.id).update({'last_used': time.time()})
+        except Exception as e:
+            print(f"Failed to update last_used timestamp: {e}")
+
+        # Generate timestamp
+        timestamp = int(time.time())
+
+        # Construct database paths
+        database_path = f"/UsersData/{uid}/readings"
+        parent_path = f"{database_path}/{timestamp}"
+
+        # Update Firebase Realtime Database
+        db.reference(f"{parent_path}/temperature").set(temperature)
+        db.reference(f"{parent_path}/humidity").set(humidity)
+        db.reference(f"{parent_path}/timestamp").set(timestamp)
+        db.reference(f"{parent_path}/door_state").set(door_status)
+        db.reference(f"{parent_path}/gas_state").set(gas_status)
+
+        return JSONResponse(content={"message": "Readings updated successfully"}, status_code=200)
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 # =============================================================================
