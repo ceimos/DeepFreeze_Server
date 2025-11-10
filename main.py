@@ -483,16 +483,58 @@ async def route_image(image: UploadFile = File(...), user_key: str = Depends(get
                 if result and result.get("food_name"):
                     return result
                 
-                # If barcode detected but lookup failed, return invalid
-                return JSONResponse(status_code=400, content={"message": "invalid"})
+                # If barcode detected but lookup failed, fall back to food model
+                print("Barcode detected but lookup failed, falling back to food prediction model")
             
-            # If barcode detection was attempted but failed, return invalid
-            # This prevents misclassification (e.g., barcode image being classified as "kiwi")
-            # Instead of falling back to food model, return invalid
-            return JSONResponse(status_code=400, content={"message": "invalid"})
-        except Exception:
-            # If barcode detection fails due to error, return invalid
-            return JSONResponse(status_code=400, content={"message": "invalid"})
+            # If no barcode found, use the food prediction model
+            print("No barcode detected, using food prediction model")
+            try:
+                food_name = predict_food(contents)
+                print(f"Food predicted by model: {food_name}")
+                
+                # Calculate expiry date (use default 7 days if not in FOOD_EXPIRY_DAYS)
+                expiry_days = FOOD_EXPIRY_DAYS.get(food_name.lower(), 7)
+                expiry_date = (datetime.today() + timedelta(days=expiry_days)).strftime("%Y-%m-%d")
+                
+                save_inventory_item({
+                    "food_name": food_name,
+                    "expiry_date": expiry_date,
+                    "source": "image",
+                    "image_id": image_id,
+                    "quantity": 1,
+                    "created_at": datetime.now().isoformat(),
+                    "status": "active"
+                }, user_key)
+                
+                return {"food_name": food_name, "expiry_date": expiry_date}
+            except Exception as e:
+                print(f"Food prediction failed: {str(e)}")
+                return JSONResponse(status_code=400, content={"message": f"Food prediction failed: {str(e)}"})
+        except Exception as e:
+            # If barcode detection fails due to error, try food prediction model
+            print(f"Barcode detection error: {str(e)}, trying food prediction model")
+            try:
+                food_name = predict_food(contents)
+                print(f"Food predicted by model: {food_name}")
+                
+                # Calculate expiry date
+                expiry_days = FOOD_EXPIRY_DAYS.get(food_name.lower(), 7)
+                expiry_date = (datetime.today() + timedelta(days=expiry_days)).strftime("%Y-%m-%d")
+                
+                save_inventory_item({
+                    "food_name": food_name,
+                    "expiry_date": expiry_date,
+                    "source": "image",
+                    "image_id": image_id,
+                    "quantity": 1,
+                    "created_at": datetime.now().isoformat(),
+                    "status": "active"
+                }, user_key)
+                
+                return {"food_name": food_name, "expiry_date": expiry_date}
+            except Exception as pred_error:
+                print(f"Food prediction also failed: {str(pred_error)}")
+                return JSONResponse(status_code=400, content={"message": "invalid"})
     except HTTPException as he:
         return JSONResponse(status_code=he.status_code, content={"message": f"HTTP error: {he.detail}"})
     except Exception as e:
