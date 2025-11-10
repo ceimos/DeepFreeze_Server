@@ -1,6 +1,6 @@
 import torch
 from torchvision import models, transforms
-
+import time
 import os
 import re
 import requests
@@ -1401,7 +1401,7 @@ async def chatbot_get_inventory(user_key: str = Depends(get_current_user_uid)):
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post('/RTDB/update_firebase_readings')
-async def update_firebase_readings(request: Request):
+async def update_firebase_readings(request):
     """
     Update Firebase Realtime Database with sensor readings.
 
