@@ -1226,7 +1226,7 @@ async def chatbot_get_inventory(user_key: str = Depends(get_current_user_uid)):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.post('/RTDB/update_firebase_readings')
+@app.post('/update_firebase_readings')
 async def update_firebase_readings(request):
     """
     Update Firebase Realtime Database with sensor readings.
