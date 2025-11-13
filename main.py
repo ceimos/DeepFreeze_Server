@@ -157,7 +157,8 @@ def get_user_from_auth(Authorization: str | None = Header(default=None)) -> str:
         device_data = device.to_dict()
         # Optionally update last_used timestamp
         try:
-            device.reference.update({'last_used': datetime.now().isoformat()})
+            device_ref = device.reference  # Get the document reference
+            device_ref.update({'last_used': datetime.now().isoformat()})
         except Exception:
             pass
         return device_data['user_id']
@@ -1302,7 +1303,8 @@ async def update_firebase_readings(request : Request):
 
         # Optionally update the last_used timestamp for the device
         try:
-            firestore_client.collection('pi_devices').document(device.id).update({'last_used': time.time()})
+            device_ref = device.reference  # Get the document reference
+            device_ref.update({'last_used': time.time()})
         except Exception as e:
             print(f"Failed to update last_used timestamp: {e}")
 
