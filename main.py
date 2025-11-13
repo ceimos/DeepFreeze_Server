@@ -53,10 +53,11 @@ class InventoryItem(BaseModel):
     expiry_date: str = None
     category: str = None
 
-cred = firebase_credentials.Certificate("smiling-gasket-468408-u8-06ed44d996c7.json")  # Replace with your Firebase service account key file
-initialize_app(cred, {
-    'databaseURL': 'https://smiling-gasket-468408-u8-default-rtdb.asia-southeast1.firebasedatabase.app/'  # Replace with your Firebase Realtime Database URL
-})
+# cred = firebase_credentials.Certificate("smiling-gasket-468408-u8-06ed44d996c7.json")  # Replace with your Firebase service account key file
+# initialize_app(cred, {
+#     'databaseURL': 'https://smiling-gasket-468408-u8-default-rtdb.asia-southeast1.firebasedatabase.app/'  # Replace with your Firebase Realtime Database URL
+# })
+initialize_app(options = { 'databaseURL': 'https://smiling-gasket-468408-u8-default-rtdb.asia-southeast1.firebasedatabase.app/' } ) #in cloud run, it should automatically resolve.
 firestore_client = firestore.client()  # Initialize Firestore client
 
 
