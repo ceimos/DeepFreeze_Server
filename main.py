@@ -10,6 +10,7 @@ from PIL import Image
 from fastapi import FastAPI, File, UploadFile, HTTPException, Depends, Header, Body
 from fastapi.responses import JSONResponse
 from fastapi.openapi.utils import get_openapi
+from fastapi import Request
 from google.cloud import firestore
 from pyzbar import pyzbar
 from datetime import datetime, timedelta
@@ -1270,7 +1271,7 @@ async def chatbot_get_inventory(user_key: str = Depends(get_current_user_uid)):
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post('/update_firebase_readings')
-async def update_firebase_readings(request):
+async def update_firebase_readings(request : Request):
     """
     Update Firebase Realtime Database with sensor readings.
 
