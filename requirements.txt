@@ -37,4 +37,5 @@ langchain==0.1.0
 torch
 torchvision
 tqdm
+zbar
 pyzbar
