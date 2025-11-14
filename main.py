@@ -54,12 +54,7 @@ class InventoryItem(BaseModel):
     expiry_date: str = None
     category: str = None
 
-# cred = firebase_credentials.Certificate("smiling-gasket-468408-u8-06ed44d996c7.json")  # Replace with your Firebase service account key file
-# initialize_app(cred, {
-#     'databaseURL': 'https://smiling-gasket-468408-u8-default-rtdb.asia-southeast1.firebasedatabase.app/'  # Replace with your Firebase Realtime Database URL
-# })
-initialize_app(options = { 'databaseURL': 'https://smiling-gasket-468408-u8-default-rtdb.asia-southeast1.firebasedatabase.app/' } ) #in cloud run, it should automatically resolve.
-firestore_client = firestore.client()  # Initialize Firestore client
+
 
 
 # Load Food-101 model and weights at startup
@@ -295,18 +290,24 @@ try:
         
         if cred:
             firebase_admin.initialize_app(cred, {
-                'storageBucket': firebase_storage_bucket
+                'storageBucket': firebase_storage_bucket,
+                'databaseURL': 'https://smiling-gasket-468408-u8-default-rtdb.asia-southeast1.firebasedatabase.app/',
             })
         else:
             # Try to use Application Default Credentials
             try:
                 firebase_admin.initialize_app(options={
-                    'storageBucket': firebase_storage_bucket
+                    'storageBucket': firebase_storage_bucket,
+                    'databaseURL': 'https://smiling-gasket-468408-u8-default-rtdb.asia-southeast1.firebasedatabase.app/',
                 })
             except Exception:
                 pass
 except Exception:
     pass
+
+# Initialize Firebase Realtime Database client
+rtdb = None
+rtdb = firebase_admin.db.reference('/')  # Initialize Realtime Database client
 
 def save_inventory_item(item: dict, user_key: str | None = None) -> None:
     """Persist an inventory item to Firestore in collection 'inventory'."""
@@ -1293,7 +1294,7 @@ async def update_firebase_readings(request : Request):
         gas_status = data['gas_status']
 
         # Query Firestore to get the user_id (uid) associated with the pi_key
-        device_query = firestore_client.collection('pi_devices').where('api_key', '==', pi_key).where('status', '==', 'active').stream()
+        device_query = db.collection('pi_devices').where('api_key', '==', pi_key).where('status', '==', 'active').stream()
         device = next(device_query, None)
         if not device:
             raise HTTPException(status_code=401, detail="Invalid or inactive Pi API key")
@@ -1301,26 +1302,19 @@ async def update_firebase_readings(request : Request):
         device_data = device.to_dict()
         uid = device_data['user_id']
 
-        # Optionally update the last_used timestamp for the device
-        try:
-            device_ref = device.reference  # Get the document reference
-            device_ref.update({'last_used': time.time()})
-        except Exception as e:
-            print(f"Failed to update last_used timestamp: {e}")
-
         # Generate timestamp
         timestamp = int(time.time())
 
         # Construct database paths
-        database_path = f"/UsersData/{uid}/readings"
+        database_path = f"UsersData/{uid}/readings"
         parent_path = f"{database_path}/{timestamp}"
 
         # Update Firebase Realtime Database
-        db.reference(f"{parent_path}/temperature").set(temperature)
-        db.reference(f"{parent_path}/humidity").set(humidity)
-        db.reference(f"{parent_path}/timestamp").set(timestamp)
-        db.reference(f"{parent_path}/door_state").set(door_status)
-        db.reference(f"{parent_path}/gas_state").set(gas_status)
+        rtdb.child(f"{parent_path}/temperature").set(temperature)
+        rtdb.child(f"{parent_path}/humidity").set(humidity)
+        rtdb.child(f"{parent_path}/timestamp").set(timestamp)
+        rtdb.child(f"{parent_path}/door_state").set(door_status)
+        rtdb.child(f"{parent_path}/gas_state").set(gas_status)
 
         return JSONResponse(content={"message": "Readings updated successfully"}, status_code=200)
 
