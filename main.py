@@ -310,12 +310,49 @@ rtdb = None
 rtdb = firebase_admin.db.reference('/')  # Initialize Realtime Database client
 
 def save_inventory_item(item: dict, user_key: str | None = None) -> None:
-    """Persist an inventory item to Firestore in collection 'inventory'."""
+    """
+    Persist an inventory item to Firestore.
+    Merges duplicates if same food_name AND same expiry_date (updates quantity).
+    Creates new entry if expiry_date is different (different batch).
+    """
     if db is None:
         return
     try:
         if user_key:
-            db.collection('users').document(user_key).collection('inventory').add(item)
+            inventory_ref = db.collection('users').document(user_key).collection('inventory')
+            food_name = item.get('food_name', '').strip()
+            expiry_date = item.get('expiry_date')
+            food_name_lower = food_name.lower()
+            
+            # Check for existing item with same food_name AND same expiry_date
+            existing_docs = inventory_ref.where('status', '==', 'active').stream()
+            
+            existing_doc = None
+            for doc in existing_docs:
+                doc_data = doc.to_dict()
+                doc_food_name = doc_data.get('food_name', '').strip().lower()
+                doc_expiry_date = doc_data.get('expiry_date')
+                
+                # Match: same food name (case-insensitive) AND same expiry date
+                if doc_food_name == food_name_lower and doc_expiry_date == expiry_date:
+                    existing_doc = doc
+                    break
+            
+            if existing_doc:
+                # Duplicate found: same food + same expiry date → merge (update quantity)
+                existing_data = existing_doc.to_dict()
+                current_quantity = existing_data.get('quantity', 0)
+                new_quantity = item.get('quantity', 1)
+                
+                existing_doc.reference.update({
+                    'quantity': current_quantity + new_quantity,
+                    'updated_at': datetime.now().isoformat()
+                })
+            else:
+                # No duplicate: different expiry date or new item → create new entry
+                # Add normalized name for easier querying
+                item['food_name_lower'] = food_name_lower
+                inventory_ref.add(item)
         else:
             db.collection('inventory').add(item)
     except Exception as e:
@@ -372,19 +409,20 @@ def save_image_to_firestore(image_data: bytes, user_key: str, item_id: str = Non
     except Exception as e:
         return None
 
-# Food expiry days mapping
+# Food expiry days mapping for items in labels.txt (Kaggle fruits and vegetables dataset)
+# Expiry dates are for items stored in refrigerator
 FOOD_EXPIRY_DAYS = {
     # Fruits
-    "apple": 30, "banana": 7, "grapes": 7, "guava": 5, "lemon": 21, "mango": 7,
-    "orange": 20, "papaya": 5, "pineapple": 5, "pomegranate": 30, "watermelon": 7,
+    "apple": 30, "banana": 7, "grapes": 7, "kiwi": 14, "lemon": 21, "mango": 7,
+    "orange": 21, "pear": 5, "pineapple": 5, "pomegranate": 60, "watermelon": 7,
     # Vegetables
-    "potato": 30, "tomato": 7, "onion": 30, "carrot": 15, "lettuce": 7, "cabbage": 10,
-    "spinach": 5, "cauliflower": 10, "capsicum": 10, "garlic": 30, "ginger": 21,
-    "peas": 7, "corn": 7, "radish": 10, "cucumber": 7, "eggplant": 5, "soy beans": 7,
-    "sweet potato": 30, "turnip": 14, "pea": 7, "beans": 7,
-    # Peppers and others
-    "bell pepper": 10, "bitter gourd": 5, "chilli pepper": 14, "chili pepper": 14,
-    "pepper": 10,
+    "beetroot": 14, "cabbage": 14, "capsicum": 10, "carrot": 21, "cauliflower": 7,
+    "corn": 5, "cucumber": 7, "eggplant": 5, "garlic": 60, "ginger": 21,
+    "lettuce": 7, "onion": 60, "peas": 5, "potato": 30, "raddish": 10,
+    "soy beans": 5, "spinach": 5, "sweetcorn": 5, "sweetpotato": 30,
+    "tomato": 7, "turnip": 14,
+    # Peppers
+    "bell pepper": 10, "chilli pepper": 14, "jalepeno": 14, "paprika": 14,
 }
 
 
