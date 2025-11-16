@@ -686,55 +686,74 @@ async def process_barcode_from_value(barcode_value: str, contents: bytes, mime_t
     """
     # Try multiple APIs
     results = []
-    
+
     # API 1: OpenFoodFacts (best for food products, excellent Indian product coverage)
     result1 = lookup_openfoodfacts(barcode_value)
     if result1:
         results.append(result1)
-    
+
     # API 2: UPCitemdb (free backup, general products)
     result2 = lookup_upcitemdb(barcode_value)
     if result2:
         results.append(result2)
-    
-    # If no results from any API, return None (caller will handle this)
+
     if not results:
         return None
-    
+
     # Prioritize results: prefer OpenFoodFacts (has expiry dates and Indian products)
-    # Sort by: has expiry date first, then by source priority
     results.sort(key=lambda x: (
-        x["expiry"] is None,  # False (has expiry) comes before True (no expiry)
-        x["source"] != "openfoodfacts"  # OpenFoodFacts first (best for food/Indian products)
+        x["expiry"] is None,
+        x["source"] != "openfoodfacts"
     ))
-    
-    # Get best result
+
     best_result = results[0]
     product_name = best_result["name"]
     expiry_str = best_result.get("expiry")
-    
-    # Parse expiry date
     parsed_expiry = parse_expiry_date(expiry_str) if expiry_str else None
-    
+
+    # --- Fetch product image from OpenFoodFacts ---
+    product_image_bytes = None
+    product_image_id = None
+    if best_result["source"] == "openfoodfacts":
+        # Look up image URL from OpenFoodFacts API
+        api_url = f"https://world.openfoodfacts.org/api/v0/product/{barcode_value}.json"
+        try:
+            r = requests.get(api_url, timeout=10)
+            r.raise_for_status()
+            data = r.json()
+            product = data.get("product", {})
+            image_url = product.get("image_url")
+            if image_url:
+                img_resp = requests.get(image_url, timeout=10)
+                img_resp.raise_for_status()
+                product_image_bytes = img_resp.content
+        except Exception:
+            product_image_bytes = None
+
+    # Save product image to Firebase Storage if available, else fallback to barcode image
+    if product_image_bytes:
+        product_image_id = save_image_to_firestore(product_image_bytes, user_key)
+    else:
+        product_image_id = image_id  # fallback to barcode image
+
     # Clean product name
     if not product_name or product_name.lower() in ["unknown", "unknown product", ""]:
         product_name = "Unknown Product"
-    
-    # Store result
+
     try:
         save_inventory_item({
             "food_name": product_name,
             "expiry_date": parsed_expiry,
             "source": "barcode",
             "barcode": barcode_value,
-            "image_id": image_id,
+            "image_id": product_image_id,
             "quantity": 1,
             "created_at": datetime.now().isoformat(),
             "status": "active"
         }, user_key)
     except Exception:
         pass
-    
+
     return {
         "food_name": product_name,
         "expiry_date": parsed_expiry
