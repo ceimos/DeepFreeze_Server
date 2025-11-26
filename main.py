@@ -85,6 +85,10 @@ def load_food_labels():
 FOOD_LABEL_NAMES = load_food_labels()
 
 def predict_food(image_bytes):
+    """
+    Predict food item from image with validation.
+    Returns: (food_name, confidence_score) or (None, confidence_score) if invalid
+    """
     image = Image.open(io.BytesIO(image_bytes)).convert('RGB')
     # EfficientNet V2 S typically uses 384x384 input size
     transform = transforms.Compose([
@@ -96,8 +100,33 @@ def predict_food(image_bytes):
     food_model.eval()
     with torch.no_grad():
         outputs = food_model(image)
-        _, predicted = torch.max(outputs, 1)
-        return FOOD_LABEL_NAMES[predicted.item()]
+        # Get probabilities using softmax
+        probabilities = torch.nn.functional.softmax(outputs, dim=1)
+        confidence, predicted = torch.max(probabilities, 1)
+        confidence_score = confidence.item()
+        predicted_idx = predicted.item()
+        
+        # Validate: Check if index is within bounds
+        if predicted_idx >= len(FOOD_LABEL_NAMES):
+            print(f"Invalid prediction index: {predicted_idx}, max allowed: {len(FOOD_LABEL_NAMES)-1}")
+            return None, 0.0
+        
+        predicted_food = FOOD_LABEL_NAMES[predicted_idx]
+        
+        # Validate: Check if predicted food is in valid labels (case-insensitive)
+        valid_foods_lower = [food.lower() for food in FOOD_LABEL_NAMES]
+        if predicted_food.lower() not in valid_foods_lower:
+            print(f"Predicted food '{predicted_food}' not in valid food list")
+            return None, confidence_score
+        
+        # Validate: Check confidence threshold (0.5 = 50% confidence)
+        CONFIDENCE_THRESHOLD = 0.25
+        if confidence_score < CONFIDENCE_THRESHOLD:
+            print(f"Low confidence prediction: {predicted_food} with confidence {confidence_score:.2f}")
+            return None, confidence_score
+        
+        print(f"Valid prediction: {predicted_food} with confidence {confidence_score:.2f}")
+        return predicted_food, confidence_score
 
 
 def generate_pi_api_key() -> str:
@@ -527,6 +556,46 @@ async def route_image(image: UploadFile = File(...), user_key: str = Depends(get
                 except Exception:
                     continue  # Try next variant
             
+            # If barcode detection attempted but failed, check if image looks like barcode
+            # If so, return invalid instead of using food model (barcode images don't look like food)
+            if not barcode_detected:
+                try:
+                    width, height = rgb_image.size
+                    aspect_ratio = width / height if height > 0 else 1
+                    
+                    # Barcode images are usually rectangular with specific aspect ratios
+                    # Check if image has barcode-like characteristics:
+                    # 1. Very wide (horizontal barcode) or very tall (vertical barcode)
+                    # 2. High contrast (black/white stripes typical of barcodes)
+                    
+                    is_barcode_like = False
+                    
+                    # Check aspect ratio (barcodes are usually wide rectangles)
+                    if aspect_ratio > 1.8 or aspect_ratio < 0.55:
+                        # Check for high contrast using image statistics
+                        # Convert to grayscale for contrast analysis
+                        gray = rgb_image.convert('L')
+                        
+                        # Calculate contrast using pixel value variance
+                        # Get pixel values
+                        pixels = list(gray.getdata())
+                        if pixels:
+                            # Calculate standard deviation as measure of contrast
+                            mean = sum(pixels) / len(pixels)
+                            variance = sum((p - mean) ** 2 for p in pixels) / len(pixels)
+                            contrast = variance ** 0.5  # Standard deviation
+                            
+                            # High contrast (>45) suggests barcode (black/white stripes)
+                            if contrast > 45:
+                                is_barcode_like = True
+                                print(f"Image appears barcode-like (aspect_ratio={aspect_ratio:.2f}, contrast={contrast:.2f}) but barcode not detected")
+                    
+                    if is_barcode_like:
+                        return JSONResponse(status_code=400, content={"message": "invalid"})
+                except Exception as e:
+                    # If barcode-like detection fails, continue to food model
+                    print(f"Barcode-like detection error: {str(e)}, continuing to food model")
+            
             # If barcode detected, look up product information
             if barcode_detected and barcode_value:
                 result = await process_barcode_from_value(barcode_value, contents, mime_type, user_key, image_id)
@@ -535,14 +604,43 @@ async def route_image(image: UploadFile = File(...), user_key: str = Depends(get
                 if result and result.get("food_name"):
                     return result
                 
-                # If barcode detected but lookup failed, fall back to food model
-                print("Barcode detected but lookup failed, falling back to food prediction model")
+                # If barcode detected but lookup failed, return invalid
+                # Don't fall back to food model because barcode images don't look like food
+                print("Barcode detected but lookup failed - returning invalid")
+                # Save invalid item to database
+                save_inventory_item({
+                    "food_name": "Unknown",
+                    "expiry_date": None,
+                    "source": "barcode_invalid",
+                    "barcode": barcode_value,
+                    "image_id": image_id,
+                    "quantity": 1,
+                    "created_at": datetime.now().isoformat(),
+                    "status": "active"
+                }, user_key)
+                return JSONResponse(status_code=400, content={"message": "invalid"})
             
             # If no barcode found, use the food prediction model
             print("No barcode detected, using food prediction model")
             try:
-                food_name = predict_food(contents)
-                print(f"Food predicted by model: {food_name}")
+                food_name, confidence = predict_food(contents)
+                
+                # If prediction is invalid (None) or confidence too low, return invalid
+                if food_name is None:
+                    print("Food prediction returned invalid result (not a valid food item or low confidence)")
+                    # Save invalid item to database
+                    save_inventory_item({
+                        "food_name": "Unknown",
+                        "expiry_date": None,
+                        "source": "image_invalid",
+                        "image_id": image_id,
+                        "quantity": 1,
+                        "created_at": datetime.now().isoformat(),
+                        "status": "active"
+                    }, user_key)
+                    return JSONResponse(status_code=400, content={"message": "invalid"})
+                
+                print(f"Food predicted by model: {food_name} (confidence: {confidence:.2f})")
                 
                 # Calculate expiry date (use default 7 days if not in FOOD_EXPIRY_DAYS)
                 expiry_days = FOOD_EXPIRY_DAYS.get(food_name.lower(), 7)
@@ -561,13 +659,29 @@ async def route_image(image: UploadFile = File(...), user_key: str = Depends(get
                 return {"food_name": food_name, "expiry_date": expiry_date}
             except Exception as e:
                 print(f"Food prediction failed: {str(e)}")
-                return JSONResponse(status_code=400, content={"message": f"Food prediction failed: {str(e)}"})
+                return JSONResponse(status_code=400, content={"message": "invalid"})
         except Exception as e:
             # If barcode detection fails due to error, try food prediction model
             print(f"Barcode detection error: {str(e)}, trying food prediction model")
             try:
-                food_name = predict_food(contents)
-                print(f"Food predicted by model: {food_name}")
+                food_name, confidence = predict_food(contents)
+                
+                # If prediction is invalid (None) or confidence too low, return invalid
+                if food_name is None:
+                    print("Food prediction returned invalid result (not a valid food item or low confidence)")
+                    # Save invalid item to database
+                    save_inventory_item({
+                        "food_name": "Unknown",
+                        "expiry_date": None,
+                        "source": "image_invalid",
+                        "image_id": image_id,
+                        "quantity": 1,
+                        "created_at": datetime.now().isoformat(),
+                        "status": "active"
+                    }, user_key)
+                    return JSONResponse(status_code=400, content={"message": "invalid"})
+                
+                print(f"Food predicted by model: {food_name} (confidence: {confidence:.2f})")
                 
                 # Calculate expiry date
                 expiry_days = FOOD_EXPIRY_DAYS.get(food_name.lower(), 7)
