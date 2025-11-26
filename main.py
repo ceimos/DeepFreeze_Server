@@ -84,6 +84,16 @@ def load_food_labels():
 
 FOOD_LABEL_NAMES = load_food_labels()
 
+# Constants for validation and thresholds
+CONFIDENCE_THRESHOLD = 0.25  # Minimum base confidence
+MIN_CONFIDENCE_GAP = 0.10     # Top prediction must be 10% better than second
+LARGE_GAP_THRESHOLD = 0.15    # If gap is this large, accept even with lower base confidence
+BARCODE_MIN_LENGTH = 8
+BARCODE_ASPECT_RATIO_MIN = 0.3
+BARCODE_ASPECT_RATIO_MAX = 2.5
+BARCODE_CONTRAST_THRESHOLD = 60.0
+DEFAULT_EXPIRY_DAYS = 7
+
 def predict_food(image_bytes):
     """
     Predict food item from image with validation.
@@ -102,9 +112,12 @@ def predict_food(image_bytes):
         outputs = food_model(image)
         # Get probabilities using softmax
         probabilities = torch.nn.functional.softmax(outputs, dim=1)
-        confidence, predicted = torch.max(probabilities, 1)
-        confidence_score = confidence.item()
-        predicted_idx = predicted.item()
+        
+        # Get top 2 predictions to check confidence gap
+        top2_probs, top2_indices = torch.topk(probabilities, 2, dim=1)
+        confidence_score = top2_probs[0][0].item()
+        second_confidence = top2_probs[0][1].item()
+        predicted_idx = top2_indices[0][0].item()
         
         # Validate: Check if index is within bounds
         if predicted_idx >= len(FOOD_LABEL_NAMES):
@@ -119,13 +132,29 @@ def predict_food(image_bytes):
             print(f"Predicted food '{predicted_food}' not in valid food list")
             return None, confidence_score
         
-        # Validate: Check confidence threshold (0.5 = 50% confidence)
-        CONFIDENCE_THRESHOLD = 0.25
+        # Check confidence gap FIRST (before base threshold)
+        # This allows items with large gaps to be accepted even with lower confidence
+        confidence_gap = confidence_score - second_confidence
+        
+        # If gap is very large (>=15%), accept even with lower base confidence
+        # This handles correctly recognized items with low absolute confidence
+        if confidence_gap >= LARGE_GAP_THRESHOLD:
+            # Large gap = model is confident in its choice, accept it
+            print(f"Valid prediction (large gap): {predicted_food} with confidence {confidence_score:.2f} (gap: {confidence_gap:.2f})")
+            return predicted_food, confidence_score
+        
+        # Check 1: Minimum confidence threshold (for smaller gaps)
         if confidence_score < CONFIDENCE_THRESHOLD:
-            print(f"Low confidence prediction: {predicted_food} with confidence {confidence_score:.2f}")
+            print(f"Low confidence prediction: {predicted_food} with confidence {confidence_score:.2f} (threshold: {CONFIDENCE_THRESHOLD})")
             return None, confidence_score
         
-        print(f"Valid prediction: {predicted_food} with confidence {confidence_score:.2f}")
+        # Check 2: Confidence gap (top prediction should be significantly better than second)
+        # This catches uncertain predictions (e.g., human face: 30% vs 28% = too close)
+        if confidence_gap < MIN_CONFIDENCE_GAP:
+            print(f"Uncertain prediction: {predicted_food} ({confidence_score:.2f}) vs second ({second_confidence:.2f}), gap: {confidence_gap:.2f} < {MIN_CONFIDENCE_GAP}")
+            return None, confidence_score
+        
+        print(f"Valid prediction: {predicted_food} with confidence {confidence_score:.2f} (gap: {confidence_gap:.2f})")
         return predicted_food, confidence_score
 
 
@@ -343,6 +372,7 @@ def save_inventory_item(item: dict, user_key: str | None = None) -> None:
     Persist an inventory item to Firestore.
     Merges duplicates if same food_name AND same expiry_date (updates quantity).
     Creates new entry if expiry_date is different (different batch).
+    For invalid items (food_name="Unknown"), always creates new entry (uses image_id for uniqueness).
     """
     if db is None:
         return
@@ -353,19 +383,32 @@ def save_inventory_item(item: dict, user_key: str | None = None) -> None:
             expiry_date = item.get('expiry_date')
             food_name_lower = food_name.lower()
             
-            # Check for existing item with same food_name AND same expiry_date
-            existing_docs = inventory_ref.where('status', '==', 'active').stream()
+            # Check if this is an invalid item (Unknown food name or invalid source)
+            is_invalid_item = (food_name_lower == 'unknown' or 
+                              item.get('source', '').endswith('_invalid'))
             
-            existing_doc = None
-            for doc in existing_docs:
-                doc_data = doc.to_dict()
-                doc_food_name = doc_data.get('food_name', '').strip().lower()
-                doc_expiry_date = doc_data.get('expiry_date')
-                
-                # Match: same food name (case-insensitive) AND same expiry date
-                if doc_food_name == food_name_lower and doc_expiry_date == expiry_date:
-                    existing_doc = doc
-                    break
+            # For invalid items, always create new entry (don't merge)
+            # Each invalid item should be distinct based on image_id
+            if is_invalid_item:
+                # Ensure food_name_lower is in item for querying
+                item['food_name_lower'] = food_name_lower
+                inventory_ref.add(item)
+                return
+            
+            # For valid items, check for duplicates
+            # Ensure food_name_lower is in item for querying
+            item['food_name_lower'] = food_name_lower
+            
+            # Check for existing item with same food_name AND same expiry_date
+            # Use optimized Firestore query instead of loading all items
+            existing_docs = inventory_ref\
+                .where('status', '==', 'active')\
+                .where('food_name_lower', '==', food_name_lower)\
+                .where('expiry_date', '==', expiry_date)\
+                .limit(1)\
+                .stream()
+            
+            existing_doc = next(existing_docs, None)
             
             if existing_doc:
                 # Duplicate found: same food + same expiry date → merge (update quantity)
@@ -379,8 +422,6 @@ def save_inventory_item(item: dict, user_key: str | None = None) -> None:
                 })
             else:
                 # No duplicate: different expiry date or new item → create new entry
-                # Add normalized name for easier querying
-                item['food_name_lower'] = food_name_lower
                 inventory_ref.add(item)
         else:
             db.collection('inventory').add(item)
@@ -570,9 +611,10 @@ async def route_image(image: UploadFile = File(...), user_key: str = Depends(get
                     
                     is_barcode_like = False
                     
-                    # Check aspect ratio (barcodes are usually wide rectangles)
-                    if aspect_ratio > 1.8 or aspect_ratio < 0.55:
-                        # Check for high contrast using image statistics
+                    # Check aspect ratio (barcodes are usually VERY wide or VERY tall rectangles)
+                    # Make this stricter - only flag extreme aspect ratios (3:1 or 1:3)
+                    if aspect_ratio > BARCODE_ASPECT_RATIO_MAX or aspect_ratio < BARCODE_ASPECT_RATIO_MIN:
+                        # Check for very high contrast using image statistics
                         # Convert to grayscale for contrast analysis
                         gray = rgb_image.convert('L')
                         
@@ -585,10 +627,16 @@ async def route_image(image: UploadFile = File(...), user_key: str = Depends(get
                             variance = sum((p - mean) ** 2 for p in pixels) / len(pixels)
                             contrast = variance ** 0.5  # Standard deviation
                             
-                            # High contrast (>45) suggests barcode (black/white stripes)
-                            if contrast > 45:
+                            # Very high contrast (>60) suggests barcode (black/white stripes)
+                            # Also check if image is mostly black/white (low color diversity)
+                            # Sample pixels to check color diversity
+                            unique_values = len(set(pixels[::100]))  # Sample every 100th pixel
+                            color_diversity = unique_values / 256.0  # Normalize to 0-1
+                            
+                            # Barcodes have very high contrast AND low color diversity (mostly black/white)
+                            if contrast > BARCODE_CONTRAST_THRESHOLD and color_diversity < 0.3:
                                 is_barcode_like = True
-                                print(f"Image appears barcode-like (aspect_ratio={aspect_ratio:.2f}, contrast={contrast:.2f}) but barcode not detected")
+                                print(f"Image appears barcode-like (aspect_ratio={aspect_ratio:.2f}, contrast={contrast:.2f}, diversity={color_diversity:.2f}) but barcode not detected")
                     
                     if is_barcode_like:
                         return JSONResponse(status_code=400, content={"message": "invalid"})
